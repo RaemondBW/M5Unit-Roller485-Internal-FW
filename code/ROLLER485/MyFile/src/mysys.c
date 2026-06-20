@@ -141,8 +141,8 @@ uint8_t usart_tx_flag = 0;
 uint8_t dis_show_flag = DIS_INFO;
 uint8_t last_dis_show_flag = DIS_INFO;
 
-uint8_t motor_mode = MODE_SPEED;
-uint8_t last_motor_mode = MODE_SPEED;
+uint8_t motor_mode = MODE_DIAL;
+uint8_t last_motor_mode = MODE_DIAL;
 
 uint8_t motor_id = 0;
 
@@ -529,6 +529,18 @@ void InitMysys(void)
     u8g2_disp_menu_update();
   }  
   init_pid();
+
+  // Detent-only firmware: ignore any stale mode in flash, boot straight into the
+  // haptic detent simulation with the simple default (continuous detents), and
+  // energize the motor so detents are felt immediately on power-up.
+  motor_mode = MODE_DIAL;
+  last_motor_mode = MODE_DIAL;
+  set_detent_config(DEFAULT_DETENT_COUNT, 0);   // 0 = continuous default
+  init_smart_knob();
+  motor_output = 1;
+  motor_disable_flag = 0;
+  MotorDriverSetMode(MDRV_MODE_RUN);
+
   if (comm_type == COMM_TYPE_I2C) {
     user_i2c_init();
     i2c1_it_enable();
@@ -597,17 +609,9 @@ void LoopMysys(void)
           last_dis_show_flag = dis_show_flag;
           my_button.was_click = 0;
         }
+        // Detent-only firmware: long-press no longer cycles control modes.
         if (my_button.is_longlongpressed) {
-          if (mode_switch_flag) {
-            motor_mode++;
-            if (motor_mode >= MODE_POS_SPEED) {
-              motor_mode = MODE_SPEED;
-            }
-            if (motor_mode == MODE_DIAL) {
-              init_smart_knob();
-            }            
-            my_button.is_longlongpressed = 0;
-          }
+          my_button.is_longlongpressed = 0;
         }
         //get input voltage
         if(ph_crrent_lpf<0)
@@ -860,89 +864,10 @@ void TIM1_UP_TIM16_IRQHandler(void)
   else
   {
     pid_compute_counter=0;
-    switch (motor_mode)
-    {
-    case MODE_SPEED:
-      if (sys_status == SYS_RUNNING) {
-        if (motor_stall_protection_flag) {
-          speed_err_value = abs((int32_t)(speed_err_rate * pid_ctrl_speed_t.setpoint));
-          speed_err_timeout = 3;
-        }
-        else {
-          speed_err_value = 0;
-          speed_err_timeout = 0;          
-        }
-        speed_pid();
-      }
-      break;
-    case MODE_POS_SPEED:
-      if (sys_status == SYS_RUNNING) {
-        pos_speed_pid();
-        speed_pid();
-      }
-      break;
-    case MODE_POS:
-      if (sys_status == SYS_RUNNING) {
-        if (motor_stall_protection_flag) {
-          if (abs((int32_t)pid_ctrl_pos_t.setpoint) > 10)
-            pos_err_value = 10;
-          else
-            pos_err_value = abs((int32_t)(pos_err_rate * pid_ctrl_pos_t.setpoint));
-          pos_err_timeout = 3;
-        }
-        else {
-          pos_err_value = 0;
-          pos_err_timeout = 0;          
-        }
-        pos_pid();
-      }
-      break;
-    case MODE_SPEED_ERR_PROTECT:
-      if (HAL_GetTick() - speed_err_auto_counter > 2000 && speed_err_count_flag) {
-        if (!err_stalled_flag && err_recover_try_max && speed_err_recover_try_counter <= err_recover_try_max - 1) {
-          speed_err_recover_try_counter++;
-          MotorDriverSetMode(MDRV_MODE_RUN);
-          motor_mode = MODE_SPEED;
-          speed_err_count_flag = 2;
-        }
-        else {
-          err_stalled_flag = 1;
-        }
-      }
-      break;
-    case MODE_POS_ERR_PROTECT:
-      if (HAL_GetTick() - pos_err_auto_counter > 2000 && pos_err_count_flag) {
-        if (!err_stalled_flag && err_recover_try_max && pos_err_recover_try_counter <= err_recover_try_max - 1) {
-          pos_err_recover_try_counter++;
-          MotorDriverSetMode(MDRV_MODE_RUN);
-          motor_mode = MODE_POS;
-          pos_err_count_flag = 2;
-        }
-        else {
-          err_stalled_flag = 1;
-        }
-      }
-      break;
-    case MODE_CURRENT:
-      if (sys_status == SYS_RUNNING) {
-        current_point_float = (float)current_point / 100.0f;
-        if (fabsf(ph_crrent_lpf / current_point_float) < 0.90f) {
-          rgb_flash_slow = 1;
-        }
-        else {
-          rgb_flash_slow = 0;
-        }
-      }
-      break;
-    case MODE_DIAL:
-      if (sys_status == SYS_RUNNING || sys_status == SYS_STANDBY)
-        handle_smart_knob();
-      break;      
-    
-    default:
-      break;
+    // Detent-only firmware: the smart-knob haptic handler is the only control law.
+    if (sys_status == SYS_RUNNING || sys_status == SYS_STANDBY) {
+      handle_smart_knob();
     }
-    
   }
 }
 

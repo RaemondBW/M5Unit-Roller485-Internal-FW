@@ -48,7 +48,7 @@
 /* USER CODE BEGIN PD */
 #define I2C_ADDRESS 0x64
 #define FIRMWARE_VERSION 1
-#define APPLICATION_ADDRESS     ((uint32_t)0x08002000)
+#define APPLICATION_ADDRESS     ((uint32_t)0x08000000)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -79,24 +79,10 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN 0 */
 void IAP_Set()
 {
-	uint8_t i;
- 
-	uint32_t *pVecTab=(uint32_t *)(0x20000000);
-
-	for(i = 0; i < 48; i++)
-	{
-		*(pVecTab++) = *(__IO uint32_t*)(APPLICATION_ADDRESS + (i<<2));
-	}
-  /* Enable the SYSCFG peripheral clock*/
-#if 1 //STM32
-  __HAL_RCC_SYSCFG_CLK_ENABLE();
-
-  __HAL_SYSCFG_REMAPMEMORY_SRAM();
-#else //AMP32
-    RCM_EnableAPB2PeriphClock(RCM_APB2_PERIPH_SYSCFG);
-    /* Remap SRAM at 0x00000000 */
-    SYSCFG->CFG1_B.MMSEL = SYSCFG_MemoryRemap_SRAM;
-#endif
+  /* This image boots directly from reset and runs from flash at 0x08000000,
+     so the vector table is used in place from flash (no SRAM relocation). Point
+     VTOR at the flash vector table explicitly in case it was changed earlier. */
+  SCB->VTOR = APPLICATION_ADDRESS;
 }
 
 __STATIC_INLINE uint32_t GXT_SYSTICK_IsActiveCounterFlag(void)
@@ -307,30 +293,7 @@ void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
         }        
       }
 
-      if (rx_mark[1]) {
-        if (rx_buf[1] && rx_buf[1] < MODE_MAX && !err_stalled_flag) {
-          motor_mode = rx_buf[1];
-          if (last_motor_mode != motor_mode) {
-            if (motor_mode < MODE_DIAL) {
-              MotorDriverSetCurrentReal(0);
-              init_pid();
-              pid_ctrl_speed_t.iTerm = 0;
-              pid_ctrl_pos_t.iTerm = 0;
-            }
-            else if (motor_mode == MODE_DIAL) {
-              init_smart_knob();
-            }
-            else if (motor_mode == MODE_POS_SPEED) {
-              MotorDriverSetCurrentReal(0);
-              PIDTuningsSet(&pid_ctrl_speed_t, speed_pid_plus_float[0], speed_pid_plus_float[1], speed_pid_plus_float[2]);
-              PIDTuningsSet(&pid_ctrl_pos_t, pos_pid_plus_float[0], pos_pid_plus_float[1], pos_pid_plus_float[2]);
-              pid_ctrl_speed_t.iTerm = 0;
-              pid_ctrl_pos_t.iTerm = 0; 
-            }
-            last_motor_mode = motor_mode;
-          }
-        }
-      }
+      // Mode-select register (0x01) removed: this is detent-only firmware.
 
       if (rx_mark[14]) {
         if (rx_buf[14]) {
@@ -373,97 +336,33 @@ void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
         flash_data_write_back();                
       }
     }
-    else if (rx_data[0] >= 0x40 && rx_data[0] <= 0x43) {
+    else if (rx_data[0] >= 0xD0 && rx_data[0] <= 0xD3) {
+      // Detent configuration:
+      //   0xD0       - bounded flag (0 = continuous, 1 = bounded with endstops)
+      //   0xD1/0xD2  - number of detents per revolution (uint16, LSB/MSB)
+      //   0xD3       - detent strength (0 = free, higher = stiffer)
       for(int i = 0; i < len - 1; i++) {
-        rx_buf[rx_data[0]-0x40+i] = rx_data[1+i];
-        rx_mark[rx_data[0]-0x40+i] = 1;     
-      } 
+        rx_buf[rx_data[0]-0xD0+i] = rx_data[1+i];
+        rx_mark[rx_data[0]-0xD0+i] = 1;
+      }
 
+      uint8_t bounded = detent_bounded;
+      uint16_t detents = num_detents;
       if (rx_mark[0]) {
-        speed_point &= ~0x000000ff;
-        speed_point |= rx_buf[0];
+        bounded = rx_buf[0] ? 1 : 0;
       }
       if (rx_mark[1]) {
-        speed_point &= ~0x0000ff00;
-        speed_point |= (rx_buf[1] << 8);
+        detents = (detents & ~0x00ff) | rx_buf[1];
       }
       if (rx_mark[2]) {
-        speed_point &= ~0x00ff0000;
-        speed_point |= (rx_buf[2] << 16);
+        detents = (detents & ~0xff00) | (rx_buf[2] << 8);
+      }
+      if (rx_mark[0] || rx_mark[1] || rx_mark[2]) {
+        set_detent_config(detents, bounded);
       }
       if (rx_mark[3]) {
-        speed_point &= ~0xff000000;
-        speed_point |= (rx_buf[3] << 24);
+        set_detent_strength(rx_buf[3]);
       }
-
-      if (speed_point > MY_INT32_MAX)
-        speed_point = MY_INT32_MAX;
-      else if (speed_point < MY_INT32_MIN)
-        speed_point = MY_INT32_MIN;
-      
-      pid_ctrl_speed_t.setpoint = (float)speed_point / 100.0f;
-    }
-    else if (rx_data[0] >= 0x80 && rx_data[0] <= 0x83) {
-      for(int i = 0; i < len - 1; i++) {
-        rx_buf[rx_data[0]-0x80+i] = rx_data[1+i];
-        rx_mark[rx_data[0]-0x80+i] = 1;     
-      } 
-
-      if (rx_mark[0]) {
-        pos_point &= ~0x000000ff;
-        pos_point |= rx_buf[0];
-      }
-      if (rx_mark[1]) {
-        pos_point &= ~0x0000ff00;
-        pos_point |= (rx_buf[1] << 8);
-      }
-      if (rx_mark[2]) {
-        pos_point &= ~0x00ff0000;
-        pos_point |= (rx_buf[2] << 16);
-      }
-      if (rx_mark[3]) {
-        pos_point &= ~0xff000000;
-        pos_point |= (rx_buf[3] << 24);
-      }
-
-      if (pos_point > MY_INT32_MAX)
-        pos_point = MY_INT32_MAX;
-      else if (pos_point < MY_INT32_MIN)
-        pos_point = MY_INT32_MIN;
-      
-      pid_ctrl_pos_t.setpoint = (float)pos_point / 100.0f;
-    }
-    else if (rx_data[0] >= 0xB0 && rx_data[0] <= 0xB3) {
-      for(int i = 0; i < len - 1; i++) {
-        rx_buf[rx_data[0]-0xB0+i] = rx_data[1+i];
-        rx_mark[rx_data[0]-0xB0+i] = 1;     
-      } 
-
-      if (rx_mark[0]) {
-        current_point &= ~0x000000ff;
-        current_point |= rx_buf[0];
-      }
-      if (rx_mark[1]) {
-        current_point &= ~0x0000ff00;
-        current_point |= (rx_buf[1] << 8);
-      }
-      if (rx_mark[2]) {
-        current_point &= ~0x00ff0000;
-        current_point |= (rx_buf[2] << 16);
-      }
-      if (rx_mark[3]) {
-        current_point &= ~0xff000000;
-        current_point |= (rx_buf[3] << 24);
-      }
-
-      if (current_point > 120000)
-        current_point = 120000;
-      else if (current_point < -120000)
-        current_point = -120000;
-
-      float current_set = (float)current_point / 100.0f;
-
-      MotorDriverSetCurrentReal(current_set);
     }
     else if (rx_data[0] >= 0x10 && rx_data[0] <= 0x12) {
       for(int i = 0; i < len - 1; i++) {
@@ -484,200 +383,6 @@ void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
         ws2812_show();
        }
       }           
-    }
-    else if (rx_data[0] >= 0x50 && rx_data[0] <= 0x53) {
-      for(int i = 0; i < len - 1; i++) {
-        rx_buf[rx_data[0]-0x50+i] = rx_data[1+i];
-        rx_mark[rx_data[0]-0x50+i] = 1;     
-      }
-
-      if (rx_mark[0]) {
-        max_speed_current &= ~0x000000ff;
-        max_speed_current |= rx_buf[0];
-      }
-      if (rx_mark[1]) {
-        max_speed_current &= ~0x0000ff00;
-        max_speed_current |= (rx_buf[1] << 8);
-      }
-      if (rx_mark[2]) {
-        max_speed_current &= ~0x00ff0000;
-        max_speed_current |= (rx_buf[2] << 16);
-      }
-      if (rx_mark[3]) {
-        max_speed_current &= ~0xff000000;
-        max_speed_current |= (rx_buf[3] << 24);
-      }
-
-      if (max_speed_current < 0)
-        max_speed_current = -max_speed_current;
-      if (max_speed_current > 120000)
-        max_speed_current = 120000;
-
-      pid_ctrl_speed_t.outMin = -((float)max_speed_current / 100);
-      pid_ctrl_speed_t.outMax = (float)max_speed_current / 100;
-    }
-    else if (rx_data[0] >= 0x20 && rx_data[0] <= 0x23) {
-      for(int i = 0; i < len - 1; i++) {
-        rx_buf[rx_data[0]-0x20+i] = rx_data[1+i];
-        rx_mark[rx_data[0]-0x20+i] = 1;     
-      }
-
-      if (rx_mark[0]) {
-        max_pos_current &= ~0x000000ff;
-        max_pos_current |= rx_buf[0];
-      }
-      if (rx_mark[1]) {
-        max_pos_current &= ~0x0000ff00;
-        max_pos_current |= (rx_buf[1] << 8);
-      }
-      if (rx_mark[2]) {
-        max_pos_current &= ~0x00ff0000;
-        max_pos_current |= (rx_buf[2] << 16);
-      }
-      if (rx_mark[3]) {
-        max_pos_current &= ~0xff000000;
-        max_pos_current |= (rx_buf[3] << 24);
-      }
-
-      if (max_pos_current < 0)
-        max_pos_current = -max_pos_current;
-      if (max_pos_current > 120000)
-        max_pos_current = 120000;
-
-      pid_ctrl_pos_t.outMin = -((float)max_pos_current / 100);
-      pid_ctrl_pos_t.outMax = (float)max_pos_current / 100;
-    }
-    else if (rx_data[0] >= 0x70 && rx_data[0] <= 0x7B) {
-      for(int i = 0; i < len - 1; i++) {
-        rx_buf[rx_data[0]-0x70+i] = rx_data[1+i];
-        rx_mark[rx_data[0]-0x70+i] = 1;     
-      }
-
-      if (rx_mark[0]) {
-        speed_pid_int[0] &= ~0x000000ff;
-        speed_pid_int[0] |= rx_buf[0];
-      }
-      if (rx_mark[1]) {
-        speed_pid_int[0] &= ~0x0000ff00;
-        speed_pid_int[0] |= (rx_buf[1] << 8);
-      }
-      if (rx_mark[2]) {
-        speed_pid_int[0] &= ~0x00ff0000;
-        speed_pid_int[0] |= (rx_buf[2] << 16);
-      }
-      if (rx_mark[3]) {
-        speed_pid_int[0] &= ~0xff000000;
-        speed_pid_int[0] |= (rx_buf[3] << 24);
-      }
-
-      if (rx_mark[4]) {
-        speed_pid_int[1] &= ~0x000000ff;
-        speed_pid_int[1] |= rx_buf[4];
-      }
-      if (rx_mark[5]) {
-        speed_pid_int[1] &= ~0x0000ff00;
-        speed_pid_int[1] |= (rx_buf[5] << 8);
-      }
-      if (rx_mark[6]) {
-        speed_pid_int[1] &= ~0x00ff0000;
-        speed_pid_int[1] |= (rx_buf[6] << 16);
-      }
-      if (rx_mark[7]) {
-        speed_pid_int[1] &= ~0xff000000;
-        speed_pid_int[1] |= (rx_buf[7] << 24);
-      }
-
-      if (rx_mark[8]) {
-        speed_pid_int[2] &= ~0x000000ff;
-        speed_pid_int[2] |= rx_buf[8];
-      }
-      if (rx_mark[9]) {
-        speed_pid_int[2] &= ~0x0000ff00;
-        speed_pid_int[2] |= (rx_buf[9] << 8);
-      }
-      if (rx_mark[10]) {
-        speed_pid_int[2] &= ~0x00ff0000;
-        speed_pid_int[2] |= (rx_buf[10] << 16);
-      }
-      if (rx_mark[11]) {
-        speed_pid_int[2] &= ~0xff000000;
-        speed_pid_int[2] |= (rx_buf[11] << 24);
-      }
-
-      for (int i = 0; i < 3; i+=2) {
-        speed_pid_float[i] = (float)speed_pid_int[i] / 100000;
-      }
-      speed_pid_float[1] = (float)speed_pid_int[1] / 10000000;
-      if (speed_pid_index == 0) {
-        PIDTuningsSet(&pid_ctrl_speed_t, speed_pid_float[0], speed_pid_float[1], speed_pid_float[2]);
-        pid_ctrl_speed_t.iTerm = 0;
-      }
-    }
-    else if (rx_data[0] >= 0xA0 && rx_data[0] <= 0xAB) {
-      for(int i = 0; i < len - 1; i++) {
-        rx_buf[rx_data[0]-0xA0+i] = rx_data[1+i];
-        rx_mark[rx_data[0]-0xA0+i] = 1;     
-      }
-
-      if (rx_mark[0]) {
-        pos_pid_int[0] &= ~0x000000ff;
-        pos_pid_int[0] |= rx_buf[0];
-      }
-      if (rx_mark[1]) {
-        pos_pid_int[0] &= ~0x0000ff00;
-        pos_pid_int[0] |= (rx_buf[1] << 8);
-      }
-      if (rx_mark[2]) {
-        pos_pid_int[0] &= ~0x00ff0000;
-        pos_pid_int[0] |= (rx_buf[2] << 16);
-      }
-      if (rx_mark[3]) {
-        pos_pid_int[0] &= ~0xff000000;
-        pos_pid_int[0] |= (rx_buf[3] << 24);
-      }
-
-      if (rx_mark[4]) {
-        pos_pid_int[1] &= ~0x000000ff;
-        pos_pid_int[1] |= rx_buf[4];
-      }
-      if (rx_mark[5]) {
-        pos_pid_int[1] &= ~0x0000ff00;
-        pos_pid_int[1] |= (rx_buf[5] << 8);
-      }
-      if (rx_mark[6]) {
-        pos_pid_int[1] &= ~0x00ff0000;
-        pos_pid_int[1] |= (rx_buf[6] << 16);
-      }
-      if (rx_mark[7]) {
-        pos_pid_int[1] &= ~0xff000000;
-        pos_pid_int[1] |= (rx_buf[7] << 24);
-      }
-
-      if (rx_mark[8]) {
-        pos_pid_int[2] &= ~0x000000ff;
-        pos_pid_int[2] |= rx_buf[8];
-      }
-      if (rx_mark[9]) {
-        pos_pid_int[2] &= ~0x0000ff00;
-        pos_pid_int[2] |= (rx_buf[9] << 8);
-      }
-      if (rx_mark[10]) {
-        pos_pid_int[2] &= ~0x00ff0000;
-        pos_pid_int[2] |= (rx_buf[10] << 16);
-      }
-      if (rx_mark[11]) {
-        pos_pid_int[2] &= ~0xff000000;
-        pos_pid_int[2] |= (rx_buf[11] << 24);
-      }
-
-      for (int i = 0; i < 3; i+=2) {
-        pos_pid_float[i] = (float)pos_pid_int[i] / 100000;
-      }
-      pos_pid_float[1] = (float)pos_pid_int[1] / 10000000;
-      if (pos_pid_index == 0) {
-        PIDTuningsSet(&pid_ctrl_pos_t, pos_pid_float[0], pos_pid_float[1], pos_pid_float[2]);
-        pid_ctrl_pos_t.iTerm = 0; 
-      }      
     }
     else if ((rx_data[0] >= 0x30) && (rx_data[0] <= 0x33))
     {
@@ -815,74 +520,27 @@ void Slave_Complete_Callback(uint8_t *rx_data, uint16_t len)
       memcpy(&tx_buf[12], (uint8_t *)&current_position, 4);
       i2c1_set_send_data((uint8_t *)&tx_buf[rx_data[0]-0x30], 0x3F-rx_data[0]+1);
     } 
-    else if (rx_data[0] >= 0x40 && rx_data[0] <= 0x43) {
-      i2c1_set_send_data((uint8_t *)&speed_point, 4);
-    } 
-    else if (rx_data[0] >= 0x50 && rx_data[0] <= 0x53) {
-      i2c1_set_send_data((uint8_t *)&max_speed_current, 4);
-    }       
-    else if (rx_data[0] >= 0x20 && rx_data[0] <= 0x23) {
-      i2c1_set_send_data((uint8_t *)&max_pos_current, 4);
-    }       
     else if (rx_data[0] >= 0x60 && rx_data[0] <= 0x63) {
       int32_t motor_rpm_int = 0;
       motor_rpm_int = motor_rpm * 100;
       i2c1_set_send_data((uint8_t *)&motor_rpm_int, 4);
     }
-    else if (rx_data[0] >= 0x80 && rx_data[0] <= 0x83) {
-      i2c1_set_send_data((uint8_t *)&pos_point, 4);
-    }
     else if (rx_data[0] >= 0x90 && rx_data[0] <= 0x93) {
       int32_t mechanical_angle_int = mechanical_angle * 100;
       i2c1_set_send_data((uint8_t *)&mechanical_angle_int, 4);
     }
-    else if (rx_data[0] >= 0xB0 && rx_data[0] <= 0xB3) {
-      i2c1_set_send_data((uint8_t *)&current_point, 4);
-    }    
     else if (rx_data[0] >= 0xC0 && rx_data[0] <= 0xC3) {
       int32_t ph_current_int = ph_crrent_lpf * 100;
       i2c1_set_send_data((uint8_t *)&ph_current_int, 4);
     } 
-    else if (rx_data[0] >= 0x70 && rx_data[0] <= 0x7B) {
-      switch (speed_pid_index)
-      {
-      case 0:
-        memcpy(tx_buf, (uint8_t *)&speed_pid_int[0], 12);
-        break;
-      case 1:
-        memcpy(tx_buf, (uint8_t *)&speed_pid_low_int[0], 12);
-        break;
-      case 2:
-        memcpy(tx_buf, (uint8_t *)&speed_pid_mid_int[0], 12);
-        break;
-      case 3:
-        memcpy(tx_buf, (uint8_t *)&speed_pid_high_int[0], 12);
-        break;
-      
-      default:
-        break;
-      }
-
-      i2c1_set_send_data((uint8_t *)&tx_buf[rx_data[0]-0x70], 0x7B-rx_data[0]+1);  
-    }       
-    else if (rx_data[0] >= 0xA0 && rx_data[0] <= 0xAB) {
-      switch (pos_pid_index) {
-      case 0:
-        memcpy(tx_buf, (uint8_t *)&pos_pid_int[0], 12);
-        break;        
-      case 1:
-        memcpy(tx_buf, (uint8_t *)&pos_pid_low_int[0], 12);
-        break;        
-      case 2:
-        memcpy(tx_buf, (uint8_t *)&pos_pid_mid_int[0], 12);
-        break;        
-      case 3:
-        memcpy(tx_buf, (uint8_t *)&pos_pid_high_int[0], 12);
-        break;        
-      }
-      
-      i2c1_set_send_data((uint8_t *)&tx_buf[rx_data[0]-0xA0], 0xAB-rx_data[0]+1);  
-    }       
+    else if (rx_data[0] >= 0xD0 && rx_data[0] <= 0xD3) {
+      // Read back detent configuration (see write handler above).
+      tx_buf[0] = detent_bounded;
+      tx_buf[1] = num_detents & 0xff;
+      tx_buf[2] = (num_detents >> 8) & 0xff;
+      tx_buf[3] = detent_strength;
+      i2c1_set_send_data((uint8_t *)&tx_buf[rx_data[0]-0xD0], 0xD3-rx_data[0]+1);
+    }
     else if (rx_data[0] == 0xFE) {
       i2c1_set_send_data((uint8_t *)&fm_version, 1);  
     }       
@@ -930,7 +588,7 @@ int main(void)
   // MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
 	InitMysys();
-  sk6812_init(PIXEL_MAX); 	
+  sk6812_init(PIXEL_MAX);
   /* USER CODE END 2 */
 
   /* Infinite loop */

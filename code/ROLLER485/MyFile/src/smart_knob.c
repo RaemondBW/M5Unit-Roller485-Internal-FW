@@ -20,14 +20,22 @@
 
 #define CONSTRAIN(x,lower,upper)    ((x)<(lower)?(lower):((x)>(upper)?(upper):(x)))
 
-#define FOC_PID_P 2500
+/* Detent strength: the knob PID P-gain = strength * DETENT_STRENGTH_SCALE.
+   Higher = stiffer detents. Settable at runtime over I2C (register 0xD3). */
+#define DETENT_STRENGTH_SCALE 10
+#define DEFAULT_DETENT_STRENGTH 200       /* -> P-gain 2000, firm click at the snap */
+
+#define FOC_PID_P (DEFAULT_DETENT_STRENGTH * DETENT_STRENGTH_SCALE)
 #define FOC_PID_I 0
-#define FOC_PID_D 10
+#define FOC_PID_D 1     /* velocity damping: high values feel draggy/stiff between detents */
 #define FOC_PID_OUTPUT_RAMP 100000
 #define FOC_PID_LIMIT 10
 
-float DEAD_ZONE_DETENT_PERCENT = 0.2;
-float DEAD_ZONE_RAD = 1 * PI / 180;
+#define MIN_DETENT_COUNT 1
+#define MAX_DETENT_COUNT 256
+
+float DEAD_ZONE_DETENT_PERCENT = 0.25;     /* free zone around each detent = smoother between clicks */
+float DEAD_ZONE_RAD = 4 * PI / 180;
 
 float IDLE_VELOCITY_EWMA_ALPHA = 0.001;
 float IDLE_VELOCITY_RAD_PER_SEC = 0.05;
@@ -37,6 +45,13 @@ float IDLE_CORRECTION_RATE_ALPHA = 0.0005;
 
 int32_t current_position = 0;
 float latest_sub_position_unit = 0;
+
+// Detent configuration exposed over I2C/RS485.
+// num_detents = number of detents per full revolution (width = 2*PI/num_detents).
+// detent_bounded = 0 -> continuous (infinite) detents, 1 -> bounded with endstops.
+uint16_t num_detents = DEFAULT_DETENT_COUNT;
+uint8_t detent_bounded = 0;
+uint8_t detent_strength = DEFAULT_DETENT_STRENGTH;
 
 float idle_check_velocity_ewma = 0;
 uint32_t last_idle_start = 0;
@@ -69,20 +84,55 @@ PB_SmartKnobConfig config = {
     .sub_position_unit = 0,
     .position_nonce = 6,
     .min_position = 0,
-    .max_position = -1,
-    .position_width_radians = 8.225806452 * PI / 180,
+    .max_position = -1,                              // continuous (unbounded) by default
+    .position_width_radians = 2 * PI / DEFAULT_DETENT_COUNT,
     .detent_strength_unit = 2,
     .endstop_strength_unit = 1,
-    .snap_point = 1.1,
+    .snap_point = 0.5,
     .led_hue = 25,
 };
 
 void init_smart_knob(void)
 {
-    current_detent_center = mechanical_rad;  
+    current_detent_center = mechanical_rad;
     timestamp_prev = micros();
     integral_prev = 0;
     output_prev = 0;
+}
+
+// Configure the detent set at runtime.
+//   detents - number of detents per full revolution (clamped to [MIN,MAX]).
+//             Each detent spans 2*PI/detents radians.
+//   bounded - 0: continuous/infinite rotation; 1: bounded with endstops at
+//             positions 0 .. detents-1 (spanning exactly one revolution).
+// Re-seeds the detent center and zeroes the reported position to avoid a jump.
+void set_detent_config(uint16_t detents, uint8_t bounded)
+{
+    if (detents < MIN_DETENT_COUNT) detents = MIN_DETENT_COUNT;
+    if (detents > MAX_DETENT_COUNT) detents = MAX_DETENT_COUNT;
+
+    num_detents = detents;
+    detent_bounded = bounded ? 1 : 0;
+
+    config.position_width_radians = 2 * PI / (float)detents;
+    if (detent_bounded) {
+        config.min_position = 0;
+        config.max_position = detents - 1;
+    } else {
+        config.min_position = 0;
+        config.max_position = -1;   // bounds disabled -> infinite detents
+    }
+
+    current_position = 0;
+    init_smart_knob();
+}
+
+// Set detent strength (0 = free spinning, higher = stiffer). Maps to the knob
+// PID P-gain. Applied live; no re-seed needed.
+void set_detent_strength(uint8_t strength)
+{
+    detent_strength = strength;
+    motor_pid_velocity_p = (float)strength * DETENT_STRENGTH_SCALE;
 }
 
 float Ts;
@@ -206,6 +256,9 @@ void handle_smart_knob(void)
         #if SK_INVERT_ROTATION
             torque = -torque;
         #endif
-        MotorDriverSetCurrentReal(torque);
+        // Negated: on this hardware positive iq drives the rotor in the same
+        // direction as increasing encoder angle, so the raw detent torque was
+        // positive feedback (knob ran away). Invert it to a restoring force.
+        MotorDriverSetCurrentReal(-torque);
     }    
 }

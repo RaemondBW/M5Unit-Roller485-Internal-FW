@@ -18,6 +18,9 @@
 
 #include "main.h"
 
+// Default "simple mode" detent count (detents per full revolution).
+#define DEFAULT_DETENT_COUNT 12
+
 typedef uint_least16_t pb_size_t;
 
 typedef struct _PB_SmartKnobConfig {
@@ -121,8 +124,13 @@ typedef struct _PB_SmartKnobConfig {
 
 extern float motor_pid_velocity_p;
 extern int32_t current_position;
+extern uint16_t num_detents;
+extern uint8_t detent_bounded;
+extern uint8_t detent_strength;
 
 void init_smart_knob(void);
 void handle_smart_knob(void);
+void set_detent_config(uint16_t detents, uint8_t bounded);
+void set_detent_strength(uint8_t strength);
 
 #endif

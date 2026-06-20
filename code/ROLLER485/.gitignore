@@ -1,1 +1,4 @@
 /MDK-ARM/BLDC_G4_DEMO
+
+# GCC/CMake build output (STM32CubeCLT)
+/gcc_build/

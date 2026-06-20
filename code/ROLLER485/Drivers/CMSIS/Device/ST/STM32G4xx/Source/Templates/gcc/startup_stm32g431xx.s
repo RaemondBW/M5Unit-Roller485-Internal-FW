@@ -62,6 +62,17 @@ Reset_Handler:
   ldr   r0, =_estack
   mov   sp, r0          /* set stack pointer */
 
+/* Enable the FPU (CP10/CP11 full access) before ANY other code. The bootloader
+   entry path leaves CPACR clear, and the C-level enable in SystemInit/main was
+   not taking effect, so the first FPU instruction faulted (NOCP -> HardFault).
+   Do it here in assembly so it is guaranteed before the first float op. */
+  ldr   r0, =0xE000ED88   /* SCB->CPACR */
+  ldr   r1, [r0]
+  orr   r1, r1, #(0xF << 20)
+  str   r1, [r0]
+  dsb
+  isb
+
 /* Copy the data segment initializers from flash to SRAM */
   ldr r0, =_sdata
   ldr r1, =_edata

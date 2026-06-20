@@ -134,6 +134,9 @@ typedef struct {
     int32_t  num_positions;    // 0 = continuous; N>0 = bounded to positions 0..N-1
     uint16_t p_gain;           // detent spring strength (knob PID P-gain)
     uint16_t torque_limit;     // max detent/endstop torque
+    float    dead_zone;        // free fraction of each detent (0..~0.5). Large =
+                               // mostly free travel with just a click near the
+                               // boundary; small = a firm well that holds center.
     uint32_t color;            // RGB 0xRRGGBB shown on the LED for this preset
     const char *name;
 } detent_preset_t;

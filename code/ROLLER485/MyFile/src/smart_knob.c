@@ -34,8 +34,12 @@
 #define MIN_DETENT_COUNT 1
 #define MAX_DETENT_COUNT 256
 
-float DEAD_ZONE_DETENT_PERCENT = 0.25;     /* free zone around each detent = smoother between clicks */
-float DEAD_ZONE_RAD = 4 * PI / 180;
+// Below this commanded torque (mA-equivalent) the motor coasts instead of
+// holding zero current, so the free part of each detent has no FOC braking.
+#define DETENT_COAST_THRESHOLD 25.0f
+
+float DEAD_ZONE_DETENT_PERCENT = 0.4;      /* free fraction of each detent (per-preset in demo) */
+float DEAD_ZONE_RAD = 60 * PI / 180;       /* absolute cap, raised so the fraction governs */
 
 float IDLE_VELOCITY_EWMA_ALPHA = 0.001;
 float IDLE_VELOCITY_RAD_PER_SEC = 0.05;
@@ -145,14 +149,18 @@ void set_detent_strength(uint8_t strength)
 }
 
 // ---- Demo presets: cycled by the button to showcase the haptic range. ----
-//                spacing positions p_gain limit  color     name
+// dead_zone is a fraction of each detent that is free; large values (~0.4) make
+// the detent feel like a brief click on an otherwise-smooth path rather than a
+// well that holds you at the center. on/off uses a small dead zone so it holds
+// its two positions like a real switch.
+//                spacing positions p_gain limit  dead   color     name
 const detent_preset_t demo_presets[] = {
-    { 12,  0, 2000, 500, 0x00FF00, "12 detents" },  // continuous 12/rev (default feel) - green
-    { 36,  0, 1800, 400, 0x00FFFF, "36 fine"    },  // fine continuous                  - cyan
-    {  4,  0, 2300, 700, 0x0000FF, "4 coarse"   },  // chunky continuous                - blue
-    { 12, 12, 2200, 600, 0xFF00FF, "12 bounded" },  // 12 positions over the rev + ends - magenta
-    { 12,  2, 3600, 900, 0xFFFF00, "on / off"   },  // 2 positions 30 deg apart, strong - yellow
-    {  1,  0,    0,   0, 0xFF0000, "free spin"  },  // no detents                       - red
+    { 12,  0, 5500, 900, 0.35f, 0x00FF00, "12 detents" },  // continuous 12/rev      - green
+    { 36,  0, 5000, 800, 0.35f, 0x00FFFF, "36 fine"    },  // fine continuous        - cyan
+    {  4,  0, 5000, 950, 0.38f, 0x0000FF, "4 coarse"   },  // chunky, mostly smooth  - blue
+    { 12, 12, 5500, 900, 0.35f, 0xFF00FF, "12 bounded" },  // 12 positions + ends    - magenta
+    { 12,  2, 3600, 900, 0.12f, 0xFFFF00, "on / off"   },  // 2-position switch hold - yellow
+    {  1,  0,    0,   0, 0.40f, 0xFF0000, "free spin"  },  // no detents             - red
 };
 const uint8_t demo_preset_count = sizeof(demo_presets) / sizeof(demo_presets[0]);
 uint8_t demo_preset_index = 0;
@@ -165,6 +173,9 @@ void apply_detent_preset(uint8_t idx)
     set_detent_config_ex(p->detents_per_rev, p->num_positions);
     motor_pid_velocity_p = (float)p->p_gain;
     motor_pid_velocity_limit = (float)p->torque_limit;
+    // Dead zone scales with the detent width (the absolute cap is raised below so
+    // the fraction governs even for wide/few detents).
+    DEAD_ZONE_DETENT_PERCENT = p->dead_zone;
     detent_strength = p->p_gain > 2550 ? 255 : (uint8_t)(p->p_gain / DETENT_STRENGTH_SCALE);
 }
 
@@ -277,6 +288,7 @@ void handle_smart_knob(void)
     if (fabsf(motor_rps) > 8) {
         // Don't apply torque if velocity is too high (helps avoid positive feedback loop/runaway)
         MotorDriverSetCurrentReal(0.0f);
+        MotorDriverCoast(1);                 // let it spin freely when flung
     } else {
         smart_knob_input = -angle_to_detent_center + dead_zone_adjustment;
         if (!out_of_bounds && config.detent_positions_count > 0) {
@@ -295,9 +307,17 @@ void handle_smart_knob(void)
         #if SK_INVERT_ROTATION
             torque = -torque;
         #endif
-        // Negated: on this hardware positive iq drives the rotor in the same
-        // direction as increasing encoder angle, so the raw detent torque was
-        // positive feedback (knob ran away). Invert it to a restoring force.
-        MotorDriverSetCurrentReal(-torque);
-    }    
+        // In the free zone (no detent/endstop torque needed) coast so the FOC
+        // current loop doesn't brake against rotation; engage drive only near a
+        // detent boundary or at an endstop. The threshold is in mA-equivalent.
+        if (fabsf(torque) < DETENT_COAST_THRESHOLD && !out_of_bounds) {
+            MotorDriverCoast(1);
+        } else {
+            MotorDriverCoast(0);
+            // Negated: on this hardware positive iq drives the rotor in the same
+            // direction as increasing encoder angle, so the raw detent torque was
+            // positive feedback (knob ran away). Invert it to a restoring force.
+            MotorDriverSetCurrentReal(-torque);
+        }
+    }
 }

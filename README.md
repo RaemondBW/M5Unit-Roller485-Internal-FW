@@ -1,9 +1,80 @@
-# M5Unit Roller485 Internal Firmware
+# M5Unit Roller485 — Haptic Detent Firmware
 
 ### SKU:U182
 
-Roller485 Unit is a brushless DC motor (BLDC) motion actuator kit integrated with multiple control functions, designed for efficient motion control. The product supports 6-16V DC power input (via PWR485 interface) or 5V input (via Grove interface) and can automatically adjust the power coefficient to ensure optimal performance. It features an internal FOC closed-loop drive system and uses a 3504 200KV brushless motor, with a maximum continuous phase current of 0.5A without forced cooling, and short-term peak current of 1A. The driver uses a magnetic encoder for feedback and supports current, speed, and position control, ensuring precise motion control. The device’s axle can be equipped with an optional slip ring, allowing the top Grove interface to remain connected to the bottom, enabling the expansion of additional modules while supporting 360° rotation, ensuring power supply and data transmission to the rotating part.
-Additionally, the back of the device features a 0.66-inch OLED display that can show real-time status, along with RGB indicator lights and function buttons for human-machine interaction. The top and base of the product are designed with LEGO-compatible mounting holes and M3 screw holes, allowing for easy setup and integration. The hardware and software of the Roller485 Unit are fully open-source, supporting motion control and parameter adjustment via RS485 or I2C buses. The unit also provides SWD and SWO debugging interfaces to enhance user flexibility. This product is widely used in robotic joints, motion control, industrial automation, and visual demonstration projects.
+This is a fork of the M5Stack Roller485 internal firmware that turns the unit
+into a **haptic detent knob** (a "smart knob"). Instead of the stock current /
+speed / position motor-controller modes, the firmware boots straight into a
+closed-loop FOC haptic mode that uses the motor to render **detents** — you feel
+evenly-spaced clicks as you turn the dial, and you can query and configure the
+behavior over I2C / RS485.
+
+## Hardware
+
+Roller485 Unit is a brushless DC motor (BLDC) motion actuator kit with an
+integrated FOC closed-loop drive system. It uses a 3504 200KV brushless motor
+(max ~0.5A continuous phase current, ~1A peak) with a magnetic encoder for
+feedback, driven by an STM32G431 (Cortex-M4F). The unit has a 0.66" OLED
+display, an RGB indicator LED, a function button, and RS485 + I2C interfaces.
+It accepts 6–16V via the PWR485 interface or 5V via Grove, and exposes SWD/SWO
+for debugging. See the [datasheet](https://docs.m5stack.com/en/unit/Unit-Roller485)
+for full hardware details.
+
+## What this firmware does
+
+- Boots directly into the haptic **detent** mode (no host command required).
+- **12 detents per revolution** by default, continuous (no endstops), tuned for
+  a light feel with a firm click into each position.
+- The detent count, bounded-vs-continuous behavior, and strength are
+  configurable live over I2C / RS485, and the current detent position can be
+  read back.
+
+The detent algorithm is based on Scott Bezek's [smartknob](https://github.com/scottbez1/smartknob).
+
+### Control registers (I2C / RS485)
+
+| Register | R/W | Meaning |
+|----------|-----|---------|
+| `0x3C`–`0x3F` | R | Current detent position (int32) |
+| `0xD0` | R/W | Bounded flag — `0` = continuous, `1` = bounded with endstops |
+| `0xD1`/`0xD2` | R/W | Detents per revolution (uint16, LSB/MSB) |
+| `0xD3` | R/W | Detent strength (`0` = free spinning, higher = stiffer; P-gain = value × 10) |
+
+The default I2C slave address is `0x64`.
+
+## Building
+
+The firmware builds with the GNU Arm toolchain bundled in
+[STM32CubeCLT](https://www.st.com/en/development-tools/stm32cubeclt.html)
+(GCC + CMake + Ninja). FreeRTOS is not used — the application runs as a
+super-loop.
+
+```bash
+cd code/ROLLER485
+cmake -S . -B gcc_build -G Ninja -DCMAKE_BUILD_TYPE=Release
+ninja -C gcc_build
+```
+
+Outputs land in `code/ROLLER485/gcc_build/`: `ROLLER485.elf`, `.hex`, `.bin`.
+
+## Flashing
+
+> **Note:** this firmware is linked to run directly from `0x08000000` (the whole
+> flash image, no separate bootloader). Flash the complete `.hex` at the start of
+> flash via SWD with an ST-Link, e.g. using the STM32CubeProgrammer CLI:
+
+```bash
+STM32_Programmer_CLI -c port=SWD mode=UR -d gcc_build/ROLLER485.hex -v -rst
+```
+
+The non-volatile parameter page (which holds the encoder calibration) is left
+untouched, so an existing factory encoder calibration is preserved.
+
+## Demo branch
+
+The `demo-detent-presets` branch adds a demo where a **button click** cycles
+through a set of detent presets (fine / coarse / bounded / on-off switch /
+free-spin), each shown with a distinct RGB LED color.
 
 ## Related Link
 

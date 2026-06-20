@@ -38,7 +38,7 @@ The detent algorithm is based on Scott Bezek's [smartknob](https://github.com/sc
 | `0x3C`–`0x3F` | R | Current detent position (int32) |
 | `0xD0` | R/W | Bounded flag — `0` = continuous, `1` = bounded with endstops |
 | `0xD1`/`0xD2` | R/W | Detents per revolution (uint16, LSB/MSB) |
-| `0xD3` | R/W | Detent strength (`0` = free spinning, higher = stiffer; P-gain = value × 10) |
+| `0xD3` | R/W | Detent strength (`0` = free spinning, higher = stiffer; P-gain = value × 25) |
 
 The default I2C slave address is `0x64`.
 

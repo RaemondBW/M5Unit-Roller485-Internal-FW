@@ -601,6 +601,29 @@ void MotorDriverSetUq(float32_t uq_set)
     }
 }
 
+// Lightweight release/engage for haptics. Coasting releases the driver MOSFETs
+// and disables the current loop so the rotor turns freely (no FOC braking) when
+// no torque is commanded; engaging re-enables drive and clears the current-loop
+// integrators to avoid a transient. Only acts on transitions. Does not touch
+// sys_status / RGB like MotorDriverSetMode, so it is safe to call every loop.
+void MotorDriverCoast(uint8_t coast)
+{
+    if (motor_driver_cal_busy) return;   // never interfere with calibration
+    if (coast) {
+        if (currentloop_enable) {
+            GPIOB->BRR = 1<<2;           // disable driver output (release)
+            currentloop_enable = 0;
+        }
+    } else {
+        if (!currentloop_enable) {
+            iq_curr_pi_value = 0; iq_curr_pi_error = 0; iq_curr_pi_errSum = 0; iq_curr_pi_result = 0;
+            id_curr_pi_value = 0; id_curr_pi_error = 0; id_curr_pi_errSum = 0; id_curr_pi_result = 0;
+            GPIOB->BSRR = 1<<2;          // enable driver output
+            currentloop_enable = 1;
+        }
+    }
+}
+
 uint16_t MotorDriverGetMechanicalAngle(void)
 {
     uint16_t mangle;

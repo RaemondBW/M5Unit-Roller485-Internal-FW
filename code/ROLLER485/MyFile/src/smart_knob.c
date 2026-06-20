@@ -22,8 +22,8 @@
 
 /* Detent strength: the knob PID P-gain = strength * DETENT_STRENGTH_SCALE.
    Higher = stiffer detents. Settable at runtime over I2C (register 0xD3). */
-#define DETENT_STRENGTH_SCALE 10
-#define DEFAULT_DETENT_STRENGTH 200       /* -> P-gain 2000, firm click at the snap */
+#define DETENT_STRENGTH_SCALE 25
+#define DEFAULT_DETENT_STRENGTH 200       /* -> P-gain 5000, firm click at the snap */
 
 #define FOC_PID_P (DEFAULT_DETENT_STRENGTH * DETENT_STRENGTH_SCALE)
 #define FOC_PID_I 0
@@ -34,8 +34,13 @@
 #define MIN_DETENT_COUNT 1
 #define MAX_DETENT_COUNT 256
 
-float DEAD_ZONE_DETENT_PERCENT = 0.25;     /* free zone around each detent = smoother between clicks */
-float DEAD_ZONE_RAD = 4 * PI / 180;
+// Below this commanded torque (mA-equivalent) the motor coasts instead of
+// holding zero current, so the free part of each detent has no FOC braking.
+#define DETENT_COAST_THRESHOLD 25.0f
+
+float DEAD_ZONE_DETENT_PERCENT = 0.4;      /* free fraction of each detent: large = a click on an
+                                              otherwise-smooth path, not a well that holds center */
+float DEAD_ZONE_RAD = 60 * PI / 180;       /* absolute cap, raised so the fraction governs */
 
 float IDLE_VELOCITY_EWMA_ALPHA = 0.001;
 float IDLE_VELOCITY_RAD_PER_SEC = 0.05;
@@ -230,14 +235,14 @@ void handle_smart_knob(void)
         fminf(config.position_width_radians*DEAD_ZONE_DETENT_PERCENT, DEAD_ZONE_RAD));
 
     out_of_bounds = num_positions > 0 && ((angle_to_detent_center > 0 && current_position == config.min_position) || (angle_to_detent_center < 0 && current_position == config.max_position));
-    motor_pid_velocity_limit = 500; //out_of_bounds ? 10 : 3;
-    // motor_pid_velocity_p = out_of_bounds ? config.endstop_strength_unit * 4 : config.detent_strength_unit * 4;
+    motor_pid_velocity_limit = 900; // max detent / endstop torque
 
 
     // Apply motor torque based on our angle to the nearest detent (detent strength, etc is handled by the PID_velocity parameters)
     if (fabsf(motor_rps) > 8) {
         // Don't apply torque if velocity is too high (helps avoid positive feedback loop/runaway)
         MotorDriverSetCurrentReal(0.0f);
+        MotorDriverCoast(1);                 // let it spin freely when flung
     } else {
         smart_knob_input = -angle_to_detent_center + dead_zone_adjustment;
         if (!out_of_bounds && config.detent_positions_count > 0) {
@@ -256,9 +261,17 @@ void handle_smart_knob(void)
         #if SK_INVERT_ROTATION
             torque = -torque;
         #endif
-        // Negated: on this hardware positive iq drives the rotor in the same
-        // direction as increasing encoder angle, so the raw detent torque was
-        // positive feedback (knob ran away). Invert it to a restoring force.
-        MotorDriverSetCurrentReal(-torque);
-    }    
+        // In the free zone (no detent/endstop torque needed) coast so the FOC
+        // current loop doesn't brake against rotation; engage drive only near a
+        // detent boundary or at an endstop.
+        if (fabsf(torque) < DETENT_COAST_THRESHOLD && !out_of_bounds) {
+            MotorDriverCoast(1);
+        } else {
+            MotorDriverCoast(0);
+            // Negated: on this hardware positive iq drives the rotor in the same
+            // direction as increasing encoder angle, so the raw detent torque was
+            // positive feedback (knob ran away). Invert it to a restoring force.
+            MotorDriverSetCurrentReal(-torque);
+        }
+    }
 }

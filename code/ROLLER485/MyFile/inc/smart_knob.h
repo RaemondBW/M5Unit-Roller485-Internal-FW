@@ -128,9 +128,26 @@ extern uint16_t num_detents;
 extern uint8_t detent_bounded;
 extern uint8_t detent_strength;
 
+// Demo presets (button-cycled) to showcase the haptic range.
+typedef struct {
+    uint16_t detents_per_rev;  // spacing: each detent spans 2*PI/detents_per_rev
+    int32_t  num_positions;    // 0 = continuous; N>0 = bounded to positions 0..N-1
+    uint16_t p_gain;           // detent spring strength (knob PID P-gain)
+    uint16_t torque_limit;     // max detent/endstop torque
+    uint32_t color;            // RGB 0xRRGGBB shown on the LED for this preset
+    const char *name;
+} detent_preset_t;
+
+extern const detent_preset_t demo_presets[];
+extern const uint8_t demo_preset_count;
+extern uint8_t demo_preset_index;
+
 void init_smart_knob(void);
 void handle_smart_knob(void);
 void set_detent_config(uint16_t detents, uint8_t bounded);
+void set_detent_config_ex(uint16_t detents_per_rev, int32_t num_positions);
 void set_detent_strength(uint8_t strength);
+void apply_detent_preset(uint8_t idx);
+void next_detent_preset(void);
 
 #endif

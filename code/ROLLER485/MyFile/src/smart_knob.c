@@ -100,25 +100,27 @@ void init_smart_knob(void)
     output_prev = 0;
 }
 
-// Configure the detent set at runtime.
-//   detents - number of detents per full revolution (clamped to [MIN,MAX]).
-//             Each detent spans 2*PI/detents radians.
-//   bounded - 0: continuous/infinite rotation; 1: bounded with endstops at
-//             positions 0 .. detents-1 (spanning exactly one revolution).
+// General detent config: spacing (detents_per_rev) is independent of the number
+// of bounded positions, so e.g. an on/off switch can have two positions close
+// together (narrow spacing) rather than half a revolution apart.
+//   detents_per_rev - detent spacing; each detent spans 2*PI/detents_per_rev.
+//   num_positions   - 0: continuous/infinite; N>0: bounded to positions 0..N-1
+//                     with hard endstops just beyond the ends.
 // Re-seeds the detent center and zeroes the reported position to avoid a jump.
-void set_detent_config(uint16_t detents, uint8_t bounded)
+void set_detent_config_ex(uint16_t detents_per_rev, int32_t num_positions)
 {
-    if (detents < MIN_DETENT_COUNT) detents = MIN_DETENT_COUNT;
-    if (detents > MAX_DETENT_COUNT) detents = MAX_DETENT_COUNT;
+    if (detents_per_rev < MIN_DETENT_COUNT) detents_per_rev = MIN_DETENT_COUNT;
+    if (detents_per_rev > MAX_DETENT_COUNT) detents_per_rev = MAX_DETENT_COUNT;
 
-    num_detents = detents;
-    detent_bounded = bounded ? 1 : 0;
+    num_detents = detents_per_rev;
+    config.position_width_radians = 2 * PI / (float)detents_per_rev;
 
-    config.position_width_radians = 2 * PI / (float)detents;
-    if (detent_bounded) {
+    if (num_positions > 0) {
+        detent_bounded = 1;
         config.min_position = 0;
-        config.max_position = detents - 1;
+        config.max_position = num_positions - 1;
     } else {
+        detent_bounded = 0;
         config.min_position = 0;
         config.max_position = -1;   // bounds disabled -> infinite detents
     }
@@ -127,12 +129,49 @@ void set_detent_config(uint16_t detents, uint8_t bounded)
     init_smart_knob();
 }
 
+// I2C/RS485 config: detents-per-rev with an optional bounded flag. When bounded,
+// the positions span one full revolution (0 .. detents-1).
+void set_detent_config(uint16_t detents, uint8_t bounded)
+{
+    set_detent_config_ex(detents, bounded ? detents : 0);
+}
+
 // Set detent strength (0 = free spinning, higher = stiffer). Maps to the knob
 // PID P-gain. Applied live; no re-seed needed.
 void set_detent_strength(uint8_t strength)
 {
     detent_strength = strength;
     motor_pid_velocity_p = (float)strength * DETENT_STRENGTH_SCALE;
+}
+
+// ---- Demo presets: cycled by the button to showcase the haptic range. ----
+//                spacing positions p_gain limit  color     name
+const detent_preset_t demo_presets[] = {
+    { 12,  0, 2000, 500, 0x00FF00, "12 detents" },  // continuous 12/rev (default feel) - green
+    { 36,  0, 1800, 400, 0x00FFFF, "36 fine"    },  // fine continuous                  - cyan
+    {  4,  0, 2300, 700, 0x0000FF, "4 coarse"   },  // chunky continuous                - blue
+    { 12, 12, 2200, 600, 0xFF00FF, "12 bounded" },  // 12 positions over the rev + ends - magenta
+    { 12,  2, 3600, 900, 0xFFFF00, "on / off"   },  // 2 positions 30 deg apart, strong - yellow
+    {  1,  0,    0,   0, 0xFF0000, "free spin"  },  // no detents                       - red
+};
+const uint8_t demo_preset_count = sizeof(demo_presets) / sizeof(demo_presets[0]);
+uint8_t demo_preset_index = 0;
+
+void apply_detent_preset(uint8_t idx)
+{
+    if (idx >= demo_preset_count) idx = 0;
+    demo_preset_index = idx;
+    const detent_preset_t *p = &demo_presets[idx];
+    set_detent_config_ex(p->detents_per_rev, p->num_positions);
+    motor_pid_velocity_p = (float)p->p_gain;
+    motor_pid_velocity_limit = (float)p->torque_limit;
+    detent_strength = p->p_gain > 2550 ? 255 : (uint8_t)(p->p_gain / DETENT_STRENGTH_SCALE);
+}
+
+// Advance to the next demo preset (wraps). Called on a button click.
+void next_detent_preset(void)
+{
+    apply_detent_preset((demo_preset_index + 1) % demo_preset_count);
 }
 
 float Ts;
@@ -230,8 +269,8 @@ void handle_smart_knob(void)
         fminf(config.position_width_radians*DEAD_ZONE_DETENT_PERCENT, DEAD_ZONE_RAD));
 
     out_of_bounds = num_positions > 0 && ((angle_to_detent_center > 0 && current_position == config.min_position) || (angle_to_detent_center < 0 && current_position == config.max_position));
-    motor_pid_velocity_limit = 500; //out_of_bounds ? 10 : 3;
-    // motor_pid_velocity_p = out_of_bounds ? config.endstop_strength_unit * 4 : config.detent_strength_unit * 4;
+    // motor_pid_velocity_limit is set per preset (apply_detent_preset) / via the
+    // strength register, not overridden here.
 
 
     // Apply motor torque based on our angle to the nearest detent (detent strength, etc is handled by the PID_velocity parameters)

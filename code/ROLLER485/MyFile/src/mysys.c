@@ -531,12 +531,15 @@ void InitMysys(void)
   init_pid();
 
   // Detent-only firmware: ignore any stale mode in flash, boot straight into the
-  // haptic detent simulation with the simple default (continuous detents), and
-  // energize the motor so detents are felt immediately on power-up.
+  // haptic detent simulation and energize the motor so detents are felt on
+  // power-up. Demo build: start on the first preset; a button click cycles them.
   motor_mode = MODE_DIAL;
   last_motor_mode = MODE_DIAL;
-  set_detent_config(DEFAULT_DETENT_COUNT, 0);   // 0 = continuous default
+  apply_detent_preset(0);
   init_smart_knob();
+  // Demo: take over the LED to show the active preset color (this disables the
+  // default mode-based LED flashing, whose writes are gated on !rgb_show_mode).
+  rgb_show_mode = 1;
   motor_output = 1;
   motor_disable_flag = 0;
   MotorDriverSetMode(MDRV_MODE_RUN);
@@ -562,10 +565,20 @@ void InitMysys(void)
 
 
 
+// Demo: show the current preset's color on both LEDs.
+static void update_demo_led(void)
+{
+    uint32_t c = demo_presets[demo_preset_index].color;
+    neopixel_set_color(0, c);
+    neopixel_set_color(1, c);
+    ws2812_show();
+}
+
 void LoopMysys(void)
 {
+    update_demo_led();   // initial preset color (LEDs are init'd by now)
     while(1)
-    {	  
+    {
         i2c_timeout_counter = 0;
         if (i2c_stop_timeout_flag) {
           if (i2c_stop_timeout_delay < HAL_GetTick()) {
@@ -602,14 +615,12 @@ void LoopMysys(void)
           HAL_GPIO_WritePin(GPIOB, RS485_DIR_Pin, GPIO_PIN_RESET);
           usart_tx_flag = 0;
         }
+        // Demo: a button click cycles through the detent presets.
         if (my_button.was_click) {
-          dis_show_flag++;
-          if (dis_show_flag >= DIS_MAX)
-            dis_show_flag = DIS_INFO;
-          last_dis_show_flag = dis_show_flag;
+          next_detent_preset();
+          update_demo_led();
           my_button.was_click = 0;
         }
-        // Detent-only firmware: long-press no longer cycles control modes.
         if (my_button.is_longlongpressed) {
           my_button.is_longlongpressed = 0;
         }
